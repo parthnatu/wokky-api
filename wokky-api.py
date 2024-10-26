@@ -16,6 +16,7 @@ openmeteo = openmeteo_requests.Client(session=retry_session)
 app = Flask(__name__)
 CORS(app, support_credentials=True)
 
+
 @app.route("/wokky_time_now", methods=["POST"])
 def wokky_time_now():
     json_request = request.get_json()
@@ -78,18 +79,19 @@ def find_next_wokable(minutely_data, tz):
 
     minutely_15_data = {
         "date": pd.date_range(
-            start=pd.to_datetime(minutely_data.Time(), unit="s", utc=False),
-            end=pd.to_datetime(minutely_data.TimeEnd(), unit="s", utc=False),
+            start=pd.to_datetime(minutely_data.Time(), unit="s", utc=True),
+            end=pd.to_datetime(minutely_data.TimeEnd(), unit="s", utc=True),
             freq=pd.Timedelta(seconds=minutely_data.Interval()),
             inclusive="left",
         )
     }
-    minutely_15_data["date"] = minutely_15_data["date"].tz_localize(tz)
+    minutely_15_data["date"] = minutely_15_data["date"].tz_convert(tz)
     minutely_15_data["temp"] = minutely_15_temperature_2m
     minutely_15_data["humid"] = minutely_15_relative_humidity_2m
     minutely_15_data["wspeed"] = minutely_15_wind_speed_10m
 
     minutely_15_dataframe = pd.DataFrame(data=minutely_15_data).sort_values(by=["date"])
+
     minutely_15_dataframe_filtered = minutely_15_dataframe.query(
         "temp >= 13 and temp <= 24 and humid >= 30 and humid <= 60 and wspeed >=5 and wspeed <= 15"
     )
@@ -101,7 +103,7 @@ def find_next_wokable(minutely_data, tz):
     return {
         "date": minutely_15_dataframe_filtered.iloc[0]["date"]
         .to_pydatetime()
-        .strftime("%I:%M %p %Z")
+        .strftime("%a %d-%m-%y %I:%M %p %Z")
     }
 
 
