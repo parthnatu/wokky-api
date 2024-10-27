@@ -103,7 +103,7 @@ def find_next_wokable(minutely_data, tz):
     return {
         "date": minutely_15_dataframe_filtered.iloc[0]["date"]
         .to_pydatetime()
-        .strftime("%d %b %Y %I:%M %p %Z")
+        .strftime("%d %b %Y %I:%M %p")
     }
 
 
