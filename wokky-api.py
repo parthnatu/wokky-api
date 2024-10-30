@@ -7,6 +7,27 @@ from flask_cors import CORS
 from geopy.geocoders import Nominatim
 import pandas as pd
 from timezonefinder import TimezoneFinder
+from pywebpush import webpush
+import os
+from apscheduler.schedulers.background import BackgroundScheduler
+import json
+from pymongo import MongoClient
+from pywebpush import WebPushException
+import atexit
+import time
+import logging
+import base64
+import hashlib
+notification_ignore_weather_flag = True
+client = MongoClient(
+    "127.0.0.1",
+    username=os.environ["MONGO_DB_USER"],
+    password=os.environ["MONGO_DB_PASSWD"],
+    authMechanism="SCRAM-SHA-256",
+)
+
+db = client["wokky"]
+priv_key = db["keys"].find_one({"name": "wokky-api-keys"})["private"]
 
 # Setup the Open-Meteo API client with cache and retry on error
 geolocator = Nominatim(user_agent="wokkyApi")
@@ -15,6 +36,95 @@ retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
 openmeteo = openmeteo_requests.Client(session=retry_session)
 app = Flask(__name__)
 CORS(app, support_credentials=True)
+
+notification_data = {"title": "Go for a walk!", "options": {"body": "The weather is looking good :)"}}
+
+
+def send_notifs():
+    for x in db["subscriptions"].find():
+        try:
+            lat = x["latitude"]
+            lon = x["longitude"]
+            hasher = hashlib.sha1(str(x["_id"]).encode('utf-8'))
+            base64_id = base64.urlsafe_b64encode(hasher.digest()[:10])
+            app.logger.debug(f"checking if {base64_id} need to be sent a notification")
+            if not should_sent_notification(lat, lon) and not notification_ignore_weather_flag:
+                app.logger.debug(
+                    f"{base64_id} does not need to be sent a notification because the weather is not optimal"
+                )
+                continue
+            if x["last_sent"] != None and (int(time.time()) - x["last_sent"]) >= 5:
+                app.logger.debug(
+                    f"{base64_id} does not need to be sent a notification because last_sent is not within the threshold"
+                )
+                continue
+            app.logger.info(
+                    f"{base64_id} sending notification"
+                )
+            
+            webpush(
+                x["_id"],
+                json.dumps(notification_data),
+                vapid_private_key=priv_key,
+                vapid_claims={"sub": "mailto:parth.natu@gmail.com"},
+            )
+            update_operation = {"$set": {"last_sent": int(time.time())}}
+            db["subscriptions"].update_one({"_id": x["_id"]}, update_operation)
+        except WebPushException as e:
+            if e.response.status_code == 410:  # subscription has gone
+                print("subscription gone! deleting")
+                db["subscriptions"].delete_one({"_id": x["_id"]})
+
+
+def get_weather_data(lat, lon):
+    url = "https://api.open-meteo.com/v1/forecast"
+    openmeteo_params = {
+        "latitude": lat,
+        "longitude": lon,
+        "current": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m"],
+        "forecast_days": 1,
+        "minutely_15": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m"],
+        "timezone": "auto",
+    }
+
+    return openmeteo.weather_api(url, params=openmeteo_params)[0]
+
+
+def check_weather_data(weather_data):
+    current = weather_data.Current()
+    current_temperature_2m = current.Variables(0).Value()
+    current_relative_humidity_2m = current.Variables(1).Value()
+    current_wind_speed_10m = current.Variables(2).Value()
+    return is_it_wokable(
+        int(current_temperature_2m),
+        int(current_relative_humidity_2m),
+        int(current_wind_speed_10m),
+    )
+
+
+def should_sent_notification(lat, lon):
+    (_, is_wokky) = check_weather_data(get_weather_data(lat, lon))
+    return is_wokky
+
+
+@app.route("/subscribe", methods=["POST"])
+def subscribe():
+    json_request = request.get_json()
+
+    susbcription = json_request["subscription"]
+    if json_request["latitude"] != 0 and json_request["longitude"] != 0:
+        db["subscriptions"].replace_one(
+            {"_id": susbcription},
+            {
+                "_id": susbcription,
+                "latitude": json_request["latitude"],
+                "longitude": json_request["longitude"],
+                "last_sent": None,
+            },
+            upsert=True,
+        )
+        return {"message": "subscribed"}
+    return {"message": "not subscribed because lat and lon are both 0"}
 
 
 @app.route("/wokky_time_now", methods=["POST"])
@@ -27,32 +137,12 @@ def wokky_time_now():
         lat=json_request["latitude"], lng=json_request["longitude"]
     )
 
-    url = "https://api.open-meteo.com/v1/forecast"
-    openmeteo_params = {
-        "latitude": json_request["latitude"],
-        "longitude": json_request["longitude"],
-        "current": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m"],
-        "forecast_days": 1,
-        "minutely_15": ["temperature_2m", "relative_humidity_2m", "wind_speed_10m"],
-        "timezone": "auto",
-    }
-
     # this should return just one location's results, get them
-    response = openmeteo.weather_api(url, params=openmeteo_params)[0]
-
-    # Current values. The order of variables needs to be the same as requested.
-    current = response.Current()
-    current_temperature_2m = current.Variables(0).Value()
-    current_relative_humidity_2m = current.Variables(1).Value()
-    current_wind_speed_10m = current.Variables(2).Value()
+    response = get_weather_data(json_request["latitude"], json_request["longitude"])
 
     # extract values into JSON
     json_response = dict()
-    (measures, is_wokky) = is_it_wokable(
-        int(current_temperature_2m),
-        int(current_relative_humidity_2m),
-        int(current_wind_speed_10m),
-    )
+    (measures, is_wokky) = check_weather_data(response)
     json_response["is_wokky"] = is_wokky
     json_response["measures"] = measures
 
@@ -185,4 +275,20 @@ def is_it_wokable(temperature, humidity, wind_speed):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", threaded=True, debug=True)
+    scheduler = BackgroundScheduler()
+    scheduler.configure(timezone="utc")
+    scheduler.add_job(send_notifs, "interval", seconds=10)
+    scheduler.start()
+    atexit.register(lambda: scheduler.shutdown())
+    app.logger.setLevel(logging.DEBUG)
+    app.run(host="0.0.0.0", threaded=True, debug=False)
+
+if __name__ != "__main__":
+    scheduler = BackgroundScheduler()
+    scheduler.configure(timezone="utc")
+    scheduler.add_job(send_notifs, "interval", seconds=10)
+    scheduler.start()
+    atexit.register(lambda: scheduler.shutdown())
+    gunicorn_logger = logging.getLogger("gunicorn.error")
+    app.logger.handlers = gunicorn_logger.handlers
+    app.logger.setLevel(gunicorn_logger.level)
