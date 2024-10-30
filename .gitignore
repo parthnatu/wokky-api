@@ -9,4 +9,4 @@ htmlcov/
 .tox/
 docs/_build/
 wokky_env*/
-.cache.sqlite
+./.cache.sqlite
