@@ -14,4 +14,4 @@ RUN pip3 install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 EXPOSE 5000
 
 # Define the command to run the Flask application using Gunicorn
-CMD ["gunicorn", "wokky-api:app", "-b", "0.0.0.0:5000", "-w", "4", "--access-logfile", "-", "--capture-output", "--log-level","debug"]
+CMD ["gunicorn", "wokky-api:app", "-b", "0.0.0.0:5000", "-w", "1","--threads","4","--access-logfile", "-", "--capture-output", "--log-level","info"]

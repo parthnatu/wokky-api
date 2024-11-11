@@ -18,9 +18,9 @@ import time
 import logging
 import base64
 import hashlib
-notification_ignore_weather_flag = True
+notification_ignore_weather_flag = False
 client = MongoClient(
-    "127.0.0.1",
+    os.environ["MONGO_DB_HOST"],
     username=os.environ["MONGO_DB_USER"],
     password=os.environ["MONGO_DB_PASSWD"],
     authMechanism="SCRAM-SHA-256",
@@ -286,7 +286,7 @@ if __name__ == "__main__":
 if __name__ != "__main__":
     scheduler = BackgroundScheduler()
     scheduler.configure(timezone="utc")
-    scheduler.add_job(send_notifs, "interval", seconds=10)
+    scheduler.add_job(send_notifs, "interval", seconds=30)
     scheduler.start()
     atexit.register(lambda: scheduler.shutdown())
     gunicorn_logger = logging.getLogger("gunicorn.error")
